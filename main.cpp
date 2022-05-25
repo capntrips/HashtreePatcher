@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <cstdlib>
 #include <unistd.h>
 #include <string>
 #include <vector>
@@ -9,22 +10,33 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <libavb/libavb.h>
+#include <fec/io.h>
 #include <openssl/sha.h>
 #include "hashtreepatcher.hpp"
+#include "version.hpp"
 
 int main(int argc, char **argv) {
     int fd_dlkm;
     int fd_vbmeta;
+    int fd_fec;
     struct stat stat_dlkm; // NOLINT(cppcoreguidelines-pro-type-member-init)
     struct stat stat_vbmeta; // NOLINT(cppcoreguidelines-pro-type-member-init)
+    struct stat stat_fec; // NOLINT(cppcoreguidelines-pro-type-member-init)
     void *addr_dlkm;
     void *addr_vbmeta;
+    void *addr_fec;
     uint8_t *buf_dlkm;
     uint8_t *buf_vbmeta;
+    uint8_t *buf_fec;
 
     if (argc != 3) {
-        fprintf(stderr, "%s <vendor_dlkm.img> <vbmeta.img>\n", argv[0]);
-        exit(EXIT_FAILURE);
+        if (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-v") == 0) {
+            printf("%s %s\n", argv[0], version);
+            exit(EXIT_SUCCESS);
+        } else {
+            fprintf(stderr, "%s <vendor_dlkm.img> <vbmeta.img>\n", argv[0]);
+            exit(EXIT_FAILURE);
+        }
     }
 
     // https://man7.org/linux/man-pages/man2/mmap.2.html#EXAMPLES
@@ -75,11 +87,18 @@ int main(int argc, char **argv) {
     uint8_t digest_size;
     uint8_t digest_padding;
     uint64_t image_size = stat_dlkm.st_size;
+    uint64_t combined_size = stat_dlkm.st_size;
+    uint64_t tree_offset = stat_dlkm.st_size;
     uint16_t block_size = 4096;
     std::vector<uint32_t> hash_level_offsets;
     uint32_t tree_size;
+    uint16_t tree_padding;
+    uint32_t fec_offset = 0;
     std::vector<uint8_t> root_digest;
     std::vector<uint8_t> hash_tree;
+    uint32_t fec_size = 0;
+    uint16_t fec_padding = 0;
+    uint32_t fec_num_roots = 0;
 
     // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/libavb/avb_vbmeta_image.c#63
     if (avb_safe_memcmp(header_block, AVB_MAGIC, AVB_MAGIC_LEN) != 0) {
@@ -166,31 +185,103 @@ int main(int argc, char **argv) {
     hash_tree = generated.second;
 
     // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#3720
-    uint16_t tree_padding = round_to_multiple(tree_size, block_size) - tree_size;
+    tree_padding = round_to_multiple(tree_size, block_size) - tree_size;
+    combined_size = tree_offset + tree_size + tree_padding;
 
-    munmap(addr_dlkm, stat_dlkm.st_size);
+    munmap(addr_dlkm, tree_offset);
 
-    if (ftruncate64(fd_dlkm, image_size + tree_size + tree_padding) != 0) { // NOLINT(cppcoreguidelines-narrowing-conversions)
+    if (ftruncate64(fd_dlkm, combined_size) != 0) { // NOLINT(cppcoreguidelines-narrowing-conversions)
         fprintf(stderr, "! Unable to resize %s\n", argv[1]);
         exit(EXIT_FAILURE);
     }
 
-    addr_dlkm = mmap(nullptr, stat_dlkm.st_size + tree_size + tree_padding, PROT_READ | PROT_WRITE, MAP_SHARED, fd_dlkm, 0);
+    addr_dlkm = mmap(nullptr, combined_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_dlkm, 0);
     if (addr_dlkm == MAP_FAILED) {
         fprintf(stderr, "! Unable to mmap %s\n", argv[1]);
         exit(EXIT_FAILURE);
     }
 
     buf_dlkm = static_cast<uint8_t *>(addr_dlkm);
-    memset(&buf_dlkm[image_size], 0, tree_size + tree_padding);
-    memcpy(&buf_dlkm[image_size], hash_tree.data(), tree_size);
+    memset(&buf_dlkm[tree_offset], 0, tree_size + tree_padding);
+    memcpy(&buf_dlkm[tree_offset], hash_tree.data(), tree_size);
+
+    bool try_fec = false;
+    fd_fec = open("fec", O_RDONLY);
+    if (fd_fec != -1) {
+        if (fstat(fd_fec, &stat_fec) != -1) {
+            try_fec = true;
+        }
+        close(fd_fec);
+    }
+    if (try_fec) {
+        fec_offset = combined_size;
+        const char *fec_filename = "fec.bin";
+
+        // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#4023
+        char command[256];
+        sprintf(command, "./fec --encode --roots 2 \"%s\" %s > /dev/null 2>&1", argv[1], fec_filename);
+        system(command);
+
+        fd_fec = open(fec_filename, O_RDWR);
+        if (fd_fec == -1) {
+            fprintf(stderr, "! Unable to open %s\n", argv[1]);
+            exit(EXIT_FAILURE);
+        }
+
+        if (fstat(fd_fec, &stat_fec) == -1) {
+            fprintf(stderr, "! Unable to fstat %s\n", argv[1]);
+            exit(EXIT_FAILURE);
+        }
+
+        addr_fec = mmap(nullptr, stat_fec.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_fec, 0);
+        if (addr_fec == MAP_FAILED) {
+            fprintf(stderr, "! Unable to mmap %s\n", argv[1]);
+            exit(EXIT_FAILURE);
+        }
+
+        buf_fec = static_cast<uint8_t *>(addr_fec);
+
+        auto *footer = reinterpret_cast<fec_header *>(&buf_fec[stat_fec.st_size - sizeof(fec_header)]);
+        if (footer->magic != FEC_MAGIC) {
+            fprintf(stderr, "! Header magic is incorrect\n");
+            exit(EXIT_FAILURE);
+        }
+
+        fec_size = footer->fec_size;
+        fec_num_roots = footer->roots;
+
+        // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#4023
+        fec_padding = round_to_multiple(fec_size, block_size) - fec_size;
+        combined_size = fec_offset + fec_size + fec_padding;
+
+        munmap(addr_dlkm, fec_offset);
+
+        if (ftruncate64(fd_dlkm, combined_size) != 0) { // NOLINT(cppcoreguidelines-narrowing-conversions)
+            fprintf(stderr, "! Unable to resize %s\n", argv[1]);
+            exit(EXIT_FAILURE);
+        }
+
+        addr_dlkm = mmap(nullptr, combined_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_dlkm, 0);
+        if (addr_dlkm == MAP_FAILED) {
+            fprintf(stderr, "! Unable to mmap %s\n", argv[1]);
+            exit(EXIT_FAILURE);
+        }
+
+        buf_dlkm = static_cast<uint8_t *>(addr_dlkm);
+        memset(&buf_dlkm[fec_offset], 0, fec_size + fec_padding);
+        memcpy(&buf_dlkm[fec_offset], buf_fec, fec_size);
+
+        munmap(addr_fec, stat_fec.st_size);
+        close(fd_fec);
+        unlink(fec_filename);
+    }
 
     dlkm_desc.image_size = image_size;
-    dlkm_desc.tree_offset = image_size;
-    dlkm_desc.tree_size = tree_size;
-    dlkm_desc.fec_num_roots = 0;
-    dlkm_desc.fec_offset = 0; // image_size + tree_size + tree_padding;
-    dlkm_desc.fec_size = 0;
+    dlkm_desc.tree_offset = tree_offset;
+    dlkm_desc.tree_size = tree_size + tree_padding;
+    dlkm_desc.fec_num_roots = fec_num_roots;
+    dlkm_desc.fec_offset = fec_offset;
+    dlkm_desc.fec_size = fec_size + fec_padding;
     avb_hashtree_descriptor_byteunswap((const AvbHashtreeDescriptor*)&dlkm_desc, dlkm_desc_orig);
     avb_memcpy((void *)dlkm_digest, root_digest.data(), root_digest.size());
     printf("- Patching complete\n");
@@ -213,7 +304,7 @@ int main(int argc, char **argv) {
            image_size, image_size, tree_size, block_size, block_size, dlkm_desc.fec_num_roots, dlkm_desc.fec_offset, dlkm_desc.fec_size, (const char *)dlkm_desc.hash_algorithm,
            mem_to_hexstring(dlkm_salt, dlkm_desc.salt_len).c_str(), mem_to_hexstring(root_digest.data(), root_digest.size()).c_str(), dlkm_desc.flags);
 
-    munmap(addr_dlkm, stat_dlkm.st_size + tree_size + tree_padding);
+    munmap(addr_dlkm, combined_size);
     close(fd_dlkm);
 
     munmap(addr_vbmeta, stat_vbmeta.st_size);
