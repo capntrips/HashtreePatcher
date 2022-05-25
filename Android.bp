@@ -1,0 +1,17 @@
+cc_binary {
+    name: "hashtreepatcher",
+    srcs: [
+        "main.cpp",
+    ],
+    shared_libs: [
+        "libcrypto",
+    ],
+    static_libs: [
+        "libavb",
+    ],
+    cflags: [
+        "-Wall",
+        "-Werror",
+        "-O3",
+    ],
+}
