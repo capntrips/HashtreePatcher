@@ -5,6 +5,7 @@ cc_binary {
     ],
     shared_libs: [
         "libcrypto",
+        "libfec",
     ],
     static_libs: [
         "libavb",
