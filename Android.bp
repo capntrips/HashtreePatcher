@@ -1,14 +1,39 @@
 cc_binary {
-    name: "hashtreepatcher",
+    name: "httools",
     srcs: [
         "main.cpp",
     ],
     shared_libs: [
         "libcrypto",
         "libfec",
+        "libbase",
+        "liblog",
     ],
     static_libs: [
         "libavb",
+        "libfs_avb",
+        "libfstab",
+    ],
+    cflags: [
+        "-Wall",
+        "-Werror",
+        "-O3",
+    ],
+}
+
+cc_binary {
+    name: "httools_static",
+    srcs: [
+        "main.cpp",
+    ],
+    static_libs: [
+        "libcrypto_static",
+        "libfec",
+        "libavb",
+        "libfs_avb",
+        "libfstab",
+        "libbase",
+        "liblog",
     ],
     cflags: [
         "-Wall",
