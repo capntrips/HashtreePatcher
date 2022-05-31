@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <linux/fs.h>
 #include <libavb/libavb.h>
 #include <fs_avb/fs_avb.h>
 #include <fec/io.h>
@@ -93,12 +94,13 @@ int main(int argc, char **argv) {
         uint8_t *buf_dlkm;
         uint8_t *buf_vbmeta;
         uint8_t *buf_fec;
+        uint64_t size_vbmeta;
 
         char *dlkm_image = argv[2];
         char *vbmeta_image = argv[3];
 
         // https://man7.org/linux/man-pages/man2/mmap.2.html#EXAMPLES
-        fd_dlkm = open(dlkm_image, O_RDWR);
+        fd_dlkm = open(dlkm_image, O_RDWR | O_CLOEXEC);
         if (fd_dlkm == -1) {
             fprintf(stderr, "! Unable to open %s\n", dlkm_image);
             exit(EXIT_FAILURE);
@@ -115,7 +117,7 @@ int main(int argc, char **argv) {
             exit(EXIT_FAILURE);
         }
 
-        fd_vbmeta = open(vbmeta_image, O_RDWR);
+        fd_vbmeta = open(vbmeta_image, O_RDWR | O_CLOEXEC);
         if (fd_vbmeta == -1) {
             fprintf(stderr, "! Unable to open %s\n", vbmeta_image);
             exit(EXIT_FAILURE);
@@ -126,7 +128,14 @@ int main(int argc, char **argv) {
             exit(EXIT_FAILURE);
         }
 
-        addr_vbmeta = mmap(nullptr, stat_vbmeta.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_vbmeta, 0);
+        // https://github.com/topjohnwu/Magisk/blob/6ef86d8d20ceb4674c02e334a53aaee22c090ea6/native/jni/base/files.cpp#L511
+        if (S_ISBLK(stat_vbmeta.st_mode)) {
+            ioctl(fd_vbmeta, BLKGETSIZE64, &size_vbmeta);
+        } else {
+            size_vbmeta = stat_vbmeta.st_size;
+        }
+
+        addr_vbmeta = mmap(nullptr, size_vbmeta, PROT_READ | PROT_WRITE, MAP_SHARED, fd_vbmeta, 0);
         if (addr_vbmeta == MAP_FAILED) {
             fprintf(stderr, "! Unable to mmap %s\n", vbmeta_image);
             exit(EXIT_FAILURE);
