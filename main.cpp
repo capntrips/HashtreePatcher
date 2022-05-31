@@ -3,7 +3,6 @@
 #include <unistd.h>
 #include <string>
 #include <vector>
-#include <utility>
 #include <algorithm>
 #include <cmath>
 #include <fcntl.h>
@@ -18,30 +17,51 @@
 
 using android::fs_mgr::AvbHandle;
 using android::fs_mgr::AvbHandleStatus;
+using android::fs_mgr::FstabEntry;
 
 int main(int argc, char **argv) {
-    int fd_dlkm;
-    int fd_vbmeta;
-    int fd_fec;
-    struct stat stat_dlkm; // NOLINT(cppcoreguidelines-pro-type-member-init)
-    struct stat stat_vbmeta; // NOLINT(cppcoreguidelines-pro-type-member-init)
-    struct stat stat_fec; // NOLINT(cppcoreguidelines-pro-type-member-init)
-    void *addr_dlkm;
-    void *addr_vbmeta;
-    void *addr_fec;
-    uint8_t *buf_dlkm;
-    uint8_t *buf_vbmeta;
-    uint8_t *buf_fec;
+    char *command_name = argv[0];
 
     if (argc <= 1) {
-        fprintf(stderr, "%s <status|patch>\n", argv[0]);
+        fprintf(stderr, "%s <avb|disable-flags|patch>\n", command_name);
         exit(EXIT_SUCCESS);
     } else if (argc == 2 && (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-v") == 0)) {
-        fprintf(stderr, "%s %s\n", argv[0], version);
+        fprintf(stderr, "%s %s\n", command_name, version);
         exit(EXIT_SUCCESS);
     }
 
-    if (strcmp(argv[1], "status") == 0) {
+    if (strcmp(argv[1], "avb") == 0) {
+        if (argc != 3) {
+            fprintf(stderr, "%s avb <partition-name>\n", command_name);
+            exit(EXIT_FAILURE);
+        }
+
+        // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/init/first_stage_mount.cpp#241
+        // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/fastboot/device/fastboot_device.cpp#82
+        // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/fs_mgr/include_fstab/fstab/fstab.h#96
+        auto fstab = std::vector<FstabEntry>();
+        if (!ReadDefaultFstab(&fstab)) {
+            fprintf(stderr, "! Unable to read default fstab\n");
+            exit(EXIT_FAILURE);
+        }
+
+        // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/init/first_stage_mount.cpp#513
+        auto vendor_dlkm_entry = std::find_if(fstab.begin(), fstab.end(), [](const auto& entry) {
+            return entry.mount_point == "/vendor_dlkm";
+        });
+
+        if (vendor_dlkm_entry == fstab.end()) {
+            fprintf(stderr, "! Unable to find vendor_dlkm in fstab\n");
+            exit(EXIT_FAILURE);
+        }
+
+        // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/init/first_stage_mount.cpp#800
+        // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/fs_mgr/fs_mgr_fstab.cpp#286
+        if (vendor_dlkm_entry->fs_mgr_flags.avb) {
+            printf("%s\n", vendor_dlkm_entry->vbmeta_partition.c_str());
+        }
+        exit(EXIT_SUCCESS);
+    } else if (strcmp(argv[1], "disable-flags") == 0) {
         if (getuid() == 0) {
             auto avb_handle = AvbHandle::LoadAndVerifyVbmeta();
             // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/init/first_stage_mount.cpp#804
@@ -56,43 +76,59 @@ int main(int argc, char **argv) {
             exit(EXIT_FAILURE);
         }
     } else if (strcmp(argv[1], "patch") == 0) {
-        if (argc != 3) {
-            fprintf(stderr, "%s <vendor_dlkm.img> <vbmeta.img>\n", argv[0]);
+        if (argc != 4) {
+            fprintf(stderr, "%s patch <vendor_dlkm.img> <vbmeta.img>\n", command_name);
             exit(EXIT_FAILURE);
         }
 
+        int fd_dlkm;
+        int fd_vbmeta;
+        int fd_fec;
+        struct stat stat_dlkm; // NOLINT(cppcoreguidelines-pro-type-member-init)
+        struct stat stat_vbmeta; // NOLINT(cppcoreguidelines-pro-type-member-init)
+        struct stat stat_fec; // NOLINT(cppcoreguidelines-pro-type-member-init)
+        void *addr_dlkm;
+        void *addr_vbmeta;
+        void *addr_fec;
+        uint8_t *buf_dlkm;
+        uint8_t *buf_vbmeta;
+        uint8_t *buf_fec;
+
+        char *dlkm_image = argv[2];
+        char *vbmeta_image = argv[3];
+
         // https://man7.org/linux/man-pages/man2/mmap.2.html#EXAMPLES
-        fd_dlkm = open(argv[1], O_RDWR);
+        fd_dlkm = open(dlkm_image, O_RDWR);
         if (fd_dlkm == -1) {
-            fprintf(stderr, "! Unable to open %s\n", argv[1]);
+            fprintf(stderr, "! Unable to open %s\n", dlkm_image);
             exit(EXIT_FAILURE);
         }
 
         if (fstat(fd_dlkm, &stat_dlkm) == -1) {
-            fprintf(stderr, "! Unable to fstat %s\n", argv[1]);
+            fprintf(stderr, "! Unable to fstat %s\n", dlkm_image);
             exit(EXIT_FAILURE);
         }
 
         addr_dlkm = mmap(nullptr, stat_dlkm.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_dlkm, 0);
         if (addr_dlkm == MAP_FAILED) {
-            fprintf(stderr, "! Unable to mmap %s\n", argv[1]);
+            fprintf(stderr, "! Unable to mmap %s\n", dlkm_image);
             exit(EXIT_FAILURE);
         }
 
-        fd_vbmeta = open(argv[2], O_RDWR);
+        fd_vbmeta = open(vbmeta_image, O_RDWR);
         if (fd_vbmeta == -1) {
-            fprintf(stderr, "! Unable to open %s\n", argv[2]);
+            fprintf(stderr, "! Unable to open %s\n", vbmeta_image);
             exit(EXIT_FAILURE);
         }
 
         if (fstat(fd_vbmeta, &stat_vbmeta) == -1) {
-            fprintf(stderr, "! Unable to fstat %s\n", argv[2]);
+            fprintf(stderr, "! Unable to fstat %s\n", vbmeta_image);
             exit(EXIT_FAILURE);
         }
 
         addr_vbmeta = mmap(nullptr, stat_vbmeta.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_vbmeta, 0);
         if (addr_vbmeta == MAP_FAILED) {
-            fprintf(stderr, "! Unable to mmap %s\n", argv[2]);
+            fprintf(stderr, "! Unable to mmap %s\n", vbmeta_image);
             exit(EXIT_FAILURE);
         }
 
@@ -213,13 +249,13 @@ int main(int argc, char **argv) {
         munmap(addr_dlkm, tree_offset);
 
         if (ftruncate64(fd_dlkm, combined_size) != 0) { // NOLINT(cppcoreguidelines-narrowing-conversions)
-            fprintf(stderr, "! Unable to resize %s\n", argv[1]);
+            fprintf(stderr, "! Unable to resize %s\n", dlkm_image);
             exit(EXIT_FAILURE);
         }
 
         addr_dlkm = mmap(nullptr, combined_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_dlkm, 0);
         if (addr_dlkm == MAP_FAILED) {
-            fprintf(stderr, "! Unable to mmap %s\n", argv[1]);
+            fprintf(stderr, "! Unable to mmap %s\n", dlkm_image);
             exit(EXIT_FAILURE);
         }
 
@@ -243,7 +279,7 @@ int main(int argc, char **argv) {
 
             // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#4023
             char command[256];
-            sprintf(command, "./fec --encode --roots 2 \"%s\" %s > /dev/null 2>&1", argv[1], fec_filename);
+            sprintf(command, "./fec --encode --roots 2 \"%s\" %s > /dev/null 2>&1", dlkm_image, fec_filename);
             system(command);
 
             fd_fec = open(fec_filename, O_RDWR);
@@ -259,7 +295,7 @@ int main(int argc, char **argv) {
 
             addr_fec = mmap(nullptr, stat_fec.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_fec, 0);
             if (addr_fec == MAP_FAILED) {
-                fprintf(stderr, "! Unable to mmap %s\n", argv[1]);
+                fprintf(stderr, "! Unable to mmap %s\n", fec_filename);
                 exit(EXIT_FAILURE);
             }
 
@@ -281,13 +317,13 @@ int main(int argc, char **argv) {
             munmap(addr_dlkm, fec_offset);
 
             if (ftruncate64(fd_dlkm, combined_size) != 0) { // NOLINT(cppcoreguidelines-narrowing-conversions)
-                fprintf(stderr, "! Unable to resize %s\n", argv[1]);
+                fprintf(stderr, "! Unable to resize %s\n", dlkm_image);
                 exit(EXIT_FAILURE);
             }
 
             addr_dlkm = mmap(nullptr, combined_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_dlkm, 0);
             if (addr_dlkm == MAP_FAILED) {
-                fprintf(stderr, "! Unable to mmap %s\n", argv[1]);
+                fprintf(stderr, "! Unable to mmap %s\n", dlkm_image);
                 exit(EXIT_FAILURE);
             }
 
@@ -336,7 +372,7 @@ int main(int argc, char **argv) {
 
         exit(EXIT_SUCCESS);
     } else {
-        fprintf(stderr, "%s <status|patch>\n", argv[0]);
+        fprintf(stderr, "%s <avb|disable-flags|patch>\n", command_name);
         exit(EXIT_FAILURE);
     }
 }
