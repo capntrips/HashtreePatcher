@@ -23,6 +23,8 @@ cc_binary {
 
 cc_binary {
     name: "httools_static",
+    device_supported: true,
+    static_executable: true,
     srcs: [
         "main.cpp",
     ],
