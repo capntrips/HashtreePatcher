@@ -65,6 +65,11 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[1], "disable-flags") == 0) {
         if (getuid() == 0) {
             auto avb_handle = AvbHandle::LoadAndVerifyVbmeta();
+            // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/init/first_stage_mount.cpp#813
+            if (!avb_handle) {
+                fprintf(stderr, "! Unable to load top-level vbmeta\n");
+                exit(EXIT_FAILURE);
+            }
             // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/init/first_stage_mount.cpp#804
             if (avb_handle->status() == AvbHandleStatus::kHashtreeDisabled || avb_handle->status() == AvbHandleStatus::kVerificationDisabled) {
                 printf("disabled\n");
