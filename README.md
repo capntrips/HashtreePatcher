@@ -14,17 +14,23 @@ with the relevant values. Both images are patched in place.
 
 ### FEC
 
-If the `fec` binary is present in the working directory, it will be used to generate FEC codes. Prebuilt binaries are available
+If the `fec` binary is present in the working directory, it will be used to generate FEC data. Prebuilt binaries are available
 [here](https://github.com/capntrips/vendor_fec/releases/tag/v12.0.0_r12).
 
 ```bash
 httools avb <partition-name>
 ```
 
-Checks if the given partition has an `avb` fs option, the value of which is returned, if so.
+Checks if the given partition has an `avb` fs option, the value of which is printed, if so.
 
 ```bash
 httools disable-flags
 ```
 
 Checks if verity and verification are disabled in the top-level `vbmeta`.
+
+```bash
+httools --version
+```
+
+Prints the current version and exits.

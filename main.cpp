@@ -19,12 +19,13 @@
 using android::fs_mgr::AvbHandle;
 using android::fs_mgr::AvbHandleStatus;
 using android::fs_mgr::FstabEntry;
+using android::fs_mgr::HashAlgorithm;
 
 int main(int argc, char **argv) {
     char *command_name = argv[0];
 
     if (argc <= 1) {
-        fprintf(stderr, "%s <avb|disable-flags|patch>\n", command_name);
+        fprintf(stderr, "%s [-v|--version] [avb|disable-flags|patch]\n", command_name);
         exit(EXIT_SUCCESS);
     } else if (argc == 2 && (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-v") == 0)) {
         fprintf(stderr, "%s %s\n", command_name, version);
@@ -64,7 +65,8 @@ int main(int argc, char **argv) {
         exit(EXIT_SUCCESS);
     } else if (strcmp(argv[1], "disable-flags") == 0) {
         if (getuid() == 0) {
-            auto avb_handle = AvbHandle::LoadAndVerifyVbmeta();
+            // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/fs_mgr/libfs_avb/fs_avb.cpp#376
+            auto avb_handle = AvbHandle::LoadAndVerifyVbmeta("vbmeta", fs_mgr_get_slot_suffix(), fs_mgr_get_other_slot_suffix(), {}, HashAlgorithm::kSHA256, true, false, false, nullptr);
             // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/init/first_stage_mount.cpp#813
             if (!avb_handle) {
                 fprintf(stderr, "! Unable to load top-level vbmeta\n");
@@ -386,7 +388,7 @@ int main(int argc, char **argv) {
 
         exit(EXIT_SUCCESS);
     } else {
-        fprintf(stderr, "%s <avb|disable-flags|patch>\n", command_name);
+        fprintf(stderr, "%s [-v|--version] [avb|disable-flags|patch]\n", command_name);
         exit(EXIT_FAILURE);
     }
 }
