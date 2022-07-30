@@ -381,23 +381,25 @@ int main(int argc, char **argv) {
             }
         }
 
-        // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr.cpp;l=1450
-        if (vendor_dlkm_entry.fs_mgr_flags.avb) {
-            if (!avb_handle) {
-                avb_handle = AvbHandle::Open();
+        if (!are_flags_disabled()) {
+            // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr.cpp;l=1450
+            if (vendor_dlkm_entry.fs_mgr_flags.avb) {
                 if (!avb_handle) {
-                    fprintf(stderr, "! Failed to open AvbHandle\n");
+                    avb_handle = AvbHandle::Open();
+                    if (!avb_handle) {
+                        fprintf(stderr, "! Failed to open AvbHandle\n");
+                        exit(EXIT_FAILURE);
+                    }
+                }
+                if (avb_handle->SetUpAvbHashtree(&vendor_dlkm_entry, true) == AvbHashtreeResult::kFail) {
+                    fprintf(stderr, "! Failed to set up AVB on partition: %s, skipping!\n", vendor_dlkm_entry.mount_point.c_str());
                     exit(EXIT_FAILURE);
                 }
-            }
-            if (avb_handle->SetUpAvbHashtree(&vendor_dlkm_entry, true) == AvbHashtreeResult::kFail) {
-                fprintf(stderr, "! Failed to set up AVB on partition: %s, skipping!\n", vendor_dlkm_entry.mount_point.c_str());
-                exit(EXIT_FAILURE);
-            }
-        } else if (!vendor_dlkm_entry.avb_keys.empty()) {
-            if (AvbHandle::SetUpStandaloneAvbHashtree(&vendor_dlkm_entry) == AvbHashtreeResult::kFail) {
-                fprintf(stderr, "! Failed to set up AVB on standalone partition: %s, skipping!\n", vendor_dlkm_entry.mount_point.c_str());
-                exit(EXIT_FAILURE);
+            } else if (!vendor_dlkm_entry.avb_keys.empty()) {
+                if (AvbHandle::SetUpStandaloneAvbHashtree(&vendor_dlkm_entry) == AvbHashtreeResult::kFail) {
+                    fprintf(stderr, "! Failed to set up AVB on standalone partition: %s, skipping!\n", vendor_dlkm_entry.mount_point.c_str());
+                    exit(EXIT_FAILURE);
+                }
             }
         }
 
@@ -427,8 +429,8 @@ int main(int argc, char **argv) {
             }
         }
 
-        if (vendor_dlkm_entry.fs_mgr_flags.avb || !vendor_dlkm_entry.avb_keys.empty()) {
-            if (!are_flags_disabled()) {
+        if (!are_flags_disabled()) {
+            if (vendor_dlkm_entry.fs_mgr_flags.avb || !vendor_dlkm_entry.avb_keys.empty()) {
                 if (!AvbHandle::TearDownAvbHashtree(&vendor_dlkm_entry, true /* wait */)) {
                     fprintf(stderr, "! Failed to tear down AVB on mount point: %s\n", vendor_dlkm_entry.mount_point.c_str());
                     exit(EXIT_FAILURE);
