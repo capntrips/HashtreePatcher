@@ -6,7 +6,9 @@ cc_binary {
     shared_libs: [
         "libcrypto",
         "libfec",
+        "libfs_mgr",
         "libbase",
+        "libcutils",
         "liblog",
     ],
     static_libs: [
@@ -34,7 +36,9 @@ cc_binary {
         "libavb",
         "libfs_avb",
         "libfstab",
+        "libfs_mgr",
         "libbase",
+        "libcutils",
         "liblog",
     ],
     cflags: [

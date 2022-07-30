@@ -2,6 +2,12 @@
 
 #include <cstring>
 
+using android::fs_mgr::FstabEntry;
+
+bool are_flags_disabled();
+FstabEntry find_vendor_dlkm_entry();
+static bool IsMountPointMounted(const std::string& mount_point);
+
 // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/test/avb_unittest_util.h#35
 // Encodes |len| bytes of |data| as a lower-case hex-string.
 std::string mem_to_hexstring(const uint8_t* data, size_t len);

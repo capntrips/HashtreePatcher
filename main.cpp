@@ -9,6 +9,10 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <linux/fs.h>
+#include <sys/mount.h>
+#include <android-base/strings.h>
+#include <android-base/file.h>
+#include <fs_mgr.h>
 #include <libavb/libavb.h>
 #include <fs_avb/fs_avb.h>
 #include <fec/io.h>
@@ -16,8 +20,13 @@
 #include "hashtreepatcher.hpp"
 #include "version.hpp"
 
+using android::base::StartsWith;
+using android::base::unique_fd;
 using android::fs_mgr::AvbHandle;
 using android::fs_mgr::AvbHandleStatus;
+using android::fs_mgr::AvbHashtreeResult;
+using android::fs_mgr::AvbUniquePtr;
+using android::fs_mgr::Fstab;
 using android::fs_mgr::FstabEntry;
 using android::fs_mgr::HashAlgorithm;
 
@@ -25,7 +34,7 @@ int main(int argc, char **argv) {
     char *command_name = argv[0];
 
     if (argc <= 1) {
-        fprintf(stderr, "%s [-v|--version] [avb|disable-flags|patch]\n", command_name);
+        fprintf(stderr, "%s [-v|--version] [avb|disable-flags|patch|mount|umount]\n", command_name);
         exit(EXIT_SUCCESS);
     } else if (argc == 2 && (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-v") == 0)) {
         fprintf(stderr, "%s %s\n", command_name, version);
@@ -33,56 +42,22 @@ int main(int argc, char **argv) {
     }
 
     if (strcmp(argv[1], "avb") == 0) {
-        if (argc != 3) {
-            fprintf(stderr, "%s avb <partition-name>\n", command_name);
-            exit(EXIT_FAILURE);
-        }
-
-        // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/init/first_stage_mount.cpp#241
-        // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/fastboot/device/fastboot_device.cpp#82
-        // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/fs_mgr/include_fstab/fstab/fstab.h#96
-        auto fstab = std::vector<FstabEntry>();
-        if (!ReadDefaultFstab(&fstab)) {
-            fprintf(stderr, "! Unable to read default fstab\n");
-            exit(EXIT_FAILURE);
-        }
-
-        // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/init/first_stage_mount.cpp#513
-        auto vendor_dlkm_entry = std::find_if(fstab.begin(), fstab.end(), [](const auto& entry) {
-            return entry.mount_point == "/vendor_dlkm";
-        });
-
-        if (vendor_dlkm_entry == fstab.end()) {
-            fprintf(stderr, "! Unable to find vendor_dlkm in fstab\n");
-            exit(EXIT_FAILURE);
-        }
+        auto vendor_dlkm_entry = find_vendor_dlkm_entry();
 
         // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/init/first_stage_mount.cpp#800
         // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/fs_mgr/fs_mgr_fstab.cpp#286
-        if (vendor_dlkm_entry->fs_mgr_flags.avb) {
-            printf("%s\n", vendor_dlkm_entry->vbmeta_partition.c_str());
+        if (vendor_dlkm_entry.fs_mgr_flags.avb) {
+            printf("%s\n", vendor_dlkm_entry.vbmeta_partition.c_str());
         }
         exit(EXIT_SUCCESS);
     } else if (strcmp(argv[1], "disable-flags") == 0) {
-        if (getuid() == 0) {
-            // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/fs_mgr/libfs_avb/fs_avb.cpp#376
-            auto avb_handle = AvbHandle::LoadAndVerifyVbmeta("vbmeta", fs_mgr_get_slot_suffix(), fs_mgr_get_other_slot_suffix(), {}, HashAlgorithm::kSHA256, true, false, false, nullptr);
-            // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/init/first_stage_mount.cpp#813
-            if (!avb_handle) {
-                fprintf(stderr, "! Unable to load top-level vbmeta\n");
-                exit(EXIT_FAILURE);
-            }
-            // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/init/first_stage_mount.cpp#804
-            if (avb_handle->status() == AvbHandleStatus::kHashtreeDisabled || avb_handle->status() == AvbHandleStatus::kVerificationDisabled) {
-                printf("disabled\n");
-            } else {
-                printf("enabled\n");
-            }
-            exit(EXIT_SUCCESS);
+        auto is_disabled = are_flags_disabled();
+        if (is_disabled) {
+            printf("disabled\n");
         } else {
-            fprintf(stderr, "! Run as root\n");
-            exit(EXIT_FAILURE);
+            printf("enabled\n");
         }
+        exit(EXIT_SUCCESS);
     } else if (strcmp(argv[1], "patch") == 0) {
         if (argc != 4) {
             fprintf(stderr, "%s patch <vendor_dlkm.img> <vbmeta.img>\n", command_name);
@@ -387,10 +362,138 @@ int main(int argc, char **argv) {
         close(fd_vbmeta);
 
         exit(EXIT_SUCCESS);
+    } else if (strcmp(argv[1], "mount") == 0) {
+        auto vendor_dlkm_entry = find_vendor_dlkm_entry();
+
+        // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr.cpp;l=1374
+        AvbUniquePtr avb_handle(nullptr);
+
+        // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr.cpp;l=1391
+        if (IsMountPointMounted(vendor_dlkm_entry.mount_point)) {
+            exit(EXIT_SUCCESS);
+        }
+
+        // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr.cpp;l=1432
+        if (vendor_dlkm_entry.fs_mgr_flags.logical) {
+            if (!fs_mgr_update_logical_partition(&vendor_dlkm_entry)) {
+                fprintf(stderr, "! Could not set up logical partition, skipping!\n");
+                exit(EXIT_FAILURE);
+            }
+        }
+
+        // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr.cpp;l=1450
+        if (vendor_dlkm_entry.fs_mgr_flags.avb) {
+            if (!avb_handle) {
+                avb_handle = AvbHandle::Open();
+                if (!avb_handle) {
+                    fprintf(stderr, "! Failed to open AvbHandle\n");
+                    exit(EXIT_FAILURE);
+                }
+            }
+            if (avb_handle->SetUpAvbHashtree(&vendor_dlkm_entry, true) == AvbHashtreeResult::kFail) {
+                fprintf(stderr, "! Failed to set up AVB on partition: %s, skipping!\n", vendor_dlkm_entry.mount_point.c_str());
+                exit(EXIT_FAILURE);
+            }
+        } else if (!vendor_dlkm_entry.avb_keys.empty()) {
+            if (AvbHandle::SetUpStandaloneAvbHashtree(&vendor_dlkm_entry) == AvbHashtreeResult::kFail) {
+                fprintf(stderr, "! Failed to set up AVB on standalone partition: %s, skipping!\n", vendor_dlkm_entry.mount_point.c_str());
+                exit(EXIT_FAILURE);
+            }
+        }
+
+        if (fs_mgr_do_mount_one(vendor_dlkm_entry) != 0) {
+            fprintf(stderr, "! Failed to mount %s\n", vendor_dlkm_entry.mount_point.c_str());
+            exit(EXIT_FAILURE);
+        }
+
+        exit(EXIT_SUCCESS);
+    } else if (strcmp(argv[1], "umount") == 0) {
+        auto vendor_dlkm_entry = find_vendor_dlkm_entry();
+
+        // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr.cpp;l=1650
+        if (!IsMountPointMounted(vendor_dlkm_entry.mount_point)) {
+            exit(EXIT_SUCCESS);
+        }
+
+        if (umount(vendor_dlkm_entry.mount_point.c_str()) == -1) {
+            fprintf(stderr, "! Failed to umount %s\n", vendor_dlkm_entry.mount_point.c_str());
+            exit(EXIT_FAILURE);
+        }
+
+        if (vendor_dlkm_entry.fs_mgr_flags.logical) {
+            if (!fs_mgr_update_logical_partition(&vendor_dlkm_entry)) {
+                fprintf(stderr, "! Could not get logical partition blk_device, skipping!\n");
+                exit(EXIT_FAILURE);
+            }
+        }
+
+        if (vendor_dlkm_entry.fs_mgr_flags.avb || !vendor_dlkm_entry.avb_keys.empty()) {
+            if (!are_flags_disabled()) {
+                if (!AvbHandle::TearDownAvbHashtree(&vendor_dlkm_entry, true /* wait */)) {
+                    fprintf(stderr, "! Failed to tear down AVB on mount point: %s\n", vendor_dlkm_entry.mount_point.c_str());
+                    exit(EXIT_FAILURE);
+                }
+            }
+        }
+
+        exit(EXIT_SUCCESS);
     } else {
-        fprintf(stderr, "%s [-v|--version] [avb|disable-flags|patch]\n", command_name);
+        fprintf(stderr, "%s [-v|--version] [avb|disable-flags|patch|mount|umount]\n", command_name);
         exit(EXIT_FAILURE);
     }
+}
+
+bool are_flags_disabled() {
+    if (getuid() == 0) {
+        // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/fs_mgr/libfs_avb/fs_avb.cpp#376
+        auto avb_handle = AvbHandle::LoadAndVerifyVbmeta("vbmeta", fs_mgr_get_slot_suffix(), fs_mgr_get_other_slot_suffix(), {}, HashAlgorithm::kSHA256, true, false, false, nullptr);
+        // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/init/first_stage_mount.cpp#813
+        if (!avb_handle) {
+            fprintf(stderr, "! Unable to load top-level vbmeta\n");
+            exit(EXIT_FAILURE);
+        }
+        // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/init/first_stage_mount.cpp#804
+        if (avb_handle->status() == AvbHandleStatus::kHashtreeDisabled || avb_handle->status() == AvbHandleStatus::kVerificationDisabled) {
+            return true;
+        } else {
+            return false;
+        }
+    } else {
+        fprintf(stderr, "! Run as root\n");
+        exit(EXIT_FAILURE);
+    }
+}
+
+FstabEntry find_vendor_dlkm_entry() {
+    // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/init/first_stage_mount.cpp#241
+    // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/fastboot/device/fastboot_device.cpp#82
+    // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/fs_mgr/include_fstab/fstab/fstab.h#96
+    Fstab fstab;
+    if (!ReadDefaultFstab(&fstab)) {
+        fprintf(stderr, "! Unable to read default fstab\n");
+        exit(EXIT_FAILURE);
+    }
+
+    // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/init/first_stage_mount.cpp#513
+    auto it = std::find_if(fstab.begin(), fstab.end(), [](const auto& entry) {
+        return entry.mount_point == "/vendor_dlkm";
+    });
+
+    if (it == fstab.end()) {
+        fprintf(stderr, "! Unable to find vendor_dlkm in fstab\n");
+        exit(EXIT_FAILURE);
+    }
+
+    return *it;
+}
+
+// https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr.cpp;l=1358
+static bool IsMountPointMounted(const std::string& mount_point) {
+    Fstab fstab;
+    if (!ReadFstabFromFile("/proc/mounts", &fstab)) {
+        return false;
+    }
+    return GetEntryForMountPoint(&fstab, mount_point) != nullptr;
 }
 
 // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/test/avb_unittest_util.cc#29
