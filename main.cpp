@@ -365,9 +365,6 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[1], "mount") == 0) {
         auto vendor_dlkm_entry = find_vendor_dlkm_entry();
 
-        // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr.cpp;l=1374
-        AvbUniquePtr avb_handle(nullptr);
-
         // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr.cpp;l=1391
         if (IsMountPointMounted(vendor_dlkm_entry.mount_point)) {
             exit(EXIT_SUCCESS);
@@ -384,13 +381,8 @@ int main(int argc, char **argv) {
         if (!are_flags_disabled()) {
             // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr.cpp;l=1450
             if (vendor_dlkm_entry.fs_mgr_flags.avb) {
-                if (!avb_handle) {
-                    avb_handle = AvbHandle::Open();
-                    if (!avb_handle) {
-                        fprintf(stderr, "! Failed to open AvbHandle\n");
-                        exit(EXIT_FAILURE);
-                    }
-                }
+                // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/libfs_avb/fs_avb.cpp;l=377
+                auto avb_handle = AvbHandle::LoadAndVerifyVbmeta("vbmeta", fs_mgr_get_slot_suffix(), fs_mgr_get_other_slot_suffix(), {}, HashAlgorithm::kSHA256, true, false, false, nullptr);
                 if (avb_handle->SetUpAvbHashtree(&vendor_dlkm_entry, true) == AvbHashtreeResult::kFail) {
                     fprintf(stderr, "! Failed to set up AVB on partition: %s, skipping!\n", vendor_dlkm_entry.mount_point.c_str());
                     exit(EXIT_FAILURE);
