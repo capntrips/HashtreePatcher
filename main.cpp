@@ -1,22 +1,25 @@
-#include <cstdio>
-#include <cstdlib>
+#include <fcntl.h>
+#include <linux/fs.h>
+#include <sys/mman.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
 #include <unistd.h>
-#include <string>
-#include <vector>
+
 #include <algorithm>
 #include <cmath>
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/mman.h>
-#include <linux/fs.h>
-#include <sys/mount.h>
-#include <android-base/strings.h>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <vector>
+
 #include <android-base/file.h>
+#include <android-base/strings.h>
+#include <fec/io.h>
+#include <fs_avb/fs_avb.h>
 #include <fs_mgr.h>
 #include <libavb/libavb.h>
-#include <fs_avb/fs_avb.h>
-#include <fec/io.h>
 #include <openssl/sha.h>
+
 #include "hashtreepatcher.hpp"
 #include "version.hpp"
 
@@ -373,7 +376,7 @@ int main(int argc, char **argv) {
         // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr.cpp;l=1432
         if (vendor_dlkm_entry.fs_mgr_flags.logical) {
             if (!fs_mgr_update_logical_partition(&vendor_dlkm_entry)) {
-                fprintf(stderr, "! Could not set up logical partition, skipping!\n");
+                fprintf(stderr, "! Could not set up logical partition\n");
                 exit(EXIT_FAILURE);
             }
         }
@@ -384,12 +387,12 @@ int main(int argc, char **argv) {
                 // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/libfs_avb/fs_avb.cpp;l=377
                 auto avb_handle = AvbHandle::LoadAndVerifyVbmeta("vbmeta", fs_mgr_get_slot_suffix(), fs_mgr_get_other_slot_suffix(), {}, HashAlgorithm::kSHA256, true, false, false, nullptr);
                 if (avb_handle->SetUpAvbHashtree(&vendor_dlkm_entry, true) == AvbHashtreeResult::kFail) {
-                    fprintf(stderr, "! Failed to set up AVB on partition: %s, skipping!\n", vendor_dlkm_entry.mount_point.c_str());
+                    fprintf(stderr, "! Failed to set up AVB on partition: %s\n", vendor_dlkm_entry.mount_point.c_str());
                     exit(EXIT_FAILURE);
                 }
             } else if (!vendor_dlkm_entry.avb_keys.empty()) {
                 if (AvbHandle::SetUpStandaloneAvbHashtree(&vendor_dlkm_entry) == AvbHashtreeResult::kFail) {
-                    fprintf(stderr, "! Failed to set up AVB on standalone partition: %s, skipping!\n", vendor_dlkm_entry.mount_point.c_str());
+                    fprintf(stderr, "! Failed to set up AVB on standalone partition: %s\n", vendor_dlkm_entry.mount_point.c_str());
                     exit(EXIT_FAILURE);
                 }
             }
@@ -416,7 +419,7 @@ int main(int argc, char **argv) {
 
         if (vendor_dlkm_entry.fs_mgr_flags.logical) {
             if (!fs_mgr_update_logical_partition(&vendor_dlkm_entry)) {
-                fprintf(stderr, "! Could not get logical partition blk_device, skipping!\n");
+                fprintf(stderr, "! Could not get logical partition blk_device\n");
                 exit(EXIT_FAILURE);
             }
         }
