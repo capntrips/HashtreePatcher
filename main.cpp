@@ -45,12 +45,17 @@ int main(int argc, char **argv) {
     }
 
     if (strcmp(argv[1], "avb") == 0) {
-        auto vendor_dlkm_entry = find_vendor_dlkm_entry();
+        if (argc != 3) {
+            fprintf(stderr, "%s avb <partition-name>\n", command_name);
+            exit(EXIT_FAILURE);
+        }
+        auto partition_name = argv[2];
+        auto fstab_entry = find_fstab_entry(partition_name);
 
         // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/init/first_stage_mount.cpp#800
         // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/fs_mgr/fs_mgr_fstab.cpp#286
-        if (vendor_dlkm_entry.fs_mgr_flags.avb) {
-            printf("%s\n", vendor_dlkm_entry.vbmeta_partition.c_str());
+        if (fstab_entry.fs_mgr_flags.avb) {
+            printf("%s\n", fstab_entry.vbmeta_partition.c_str());
         }
         exit(EXIT_SUCCESS);
     } else if (strcmp(argv[1], "disable-flags") == 0) {
@@ -62,43 +67,44 @@ int main(int argc, char **argv) {
         }
         exit(EXIT_SUCCESS);
     } else if (strcmp(argv[1], "patch") == 0) {
-        if (argc != 4) {
-            fprintf(stderr, "%s patch <vendor_dlkm.img> <vbmeta.img>\n", command_name);
+        if (argc != 5) {
+            fprintf(stderr, "%s patch <partition-name> <partition.img> <vbmeta.img>\n", command_name);
             exit(EXIT_FAILURE);
         }
 
-        int fd_dlkm;
+        int fd_partition;
         int fd_vbmeta;
         int fd_fec;
-        struct stat stat_dlkm; // NOLINT(cppcoreguidelines-pro-type-member-init)
+        struct stat stat_partition; // NOLINT(cppcoreguidelines-pro-type-member-init)
         struct stat stat_vbmeta; // NOLINT(cppcoreguidelines-pro-type-member-init)
         struct stat stat_fec; // NOLINT(cppcoreguidelines-pro-type-member-init)
-        void *addr_dlkm;
+        void *addr_partition;
         void *addr_vbmeta;
         void *addr_fec;
-        uint8_t *buf_dlkm;
+        uint8_t *buf_partition;
         uint8_t *buf_vbmeta;
         uint8_t *buf_fec;
         uint64_t size_vbmeta;
 
-        char *dlkm_image = argv[2];
-        char *vbmeta_image = argv[3];
+        auto partition_name = argv[2];
+        auto partition_image = argv[3];
+        auto vbmeta_image = argv[4];
 
         // https://man7.org/linux/man-pages/man2/mmap.2.html#EXAMPLES
-        fd_dlkm = open(dlkm_image, O_RDWR | O_CLOEXEC);
-        if (fd_dlkm == -1) {
-            fprintf(stderr, "! Unable to open %s\n", dlkm_image);
+        fd_partition = open(partition_image, O_RDWR | O_CLOEXEC);
+        if (fd_partition == -1) {
+            fprintf(stderr, "! Unable to open %s\n", partition_image);
             exit(EXIT_FAILURE);
         }
 
-        if (fstat(fd_dlkm, &stat_dlkm) == -1) {
-            fprintf(stderr, "! Unable to fstat %s\n", dlkm_image);
+        if (fstat(fd_partition, &stat_partition) == -1) {
+            fprintf(stderr, "! Unable to fstat %s\n", partition_image);
             exit(EXIT_FAILURE);
         }
 
-        addr_dlkm = mmap(nullptr, stat_dlkm.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_dlkm, 0);
-        if (addr_dlkm == MAP_FAILED) {
-            fprintf(stderr, "! Unable to mmap %s\n", dlkm_image);
+        addr_partition = mmap(nullptr, stat_partition.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_partition, 0);
+        if (addr_partition == MAP_FAILED) {
+            fprintf(stderr, "! Unable to mmap %s\n", partition_image);
             exit(EXIT_FAILURE);
         }
 
@@ -126,21 +132,21 @@ int main(int argc, char **argv) {
             exit(EXIT_FAILURE);
         }
 
-        buf_dlkm = static_cast<uint8_t *>(addr_dlkm);
+        buf_partition = static_cast<uint8_t *>(addr_partition);
         buf_vbmeta = static_cast<uint8_t *>(addr_vbmeta);
 
         const uint8_t* header_block = buf_vbmeta;
         AvbVBMetaImageHeader vbmeta_header;
         size_t vbmeta_length;
-        AvbHashtreeDescriptor* dlkm_desc_orig;
-        AvbHashtreeDescriptor dlkm_desc;
-        const uint8_t* dlkm_salt;
-        const uint8_t* dlkm_digest;
+        AvbHashtreeDescriptor* partition_desc_orig;
+        AvbHashtreeDescriptor partition_desc;
+        const uint8_t* partition_salt;
+        const uint8_t* partition_digest;
         uint8_t digest_size;
         uint8_t digest_padding;
-        uint64_t image_size = stat_dlkm.st_size;
-        uint64_t combined_size = stat_dlkm.st_size;
-        uint64_t tree_offset = stat_dlkm.st_size;
+        uint64_t image_size = stat_partition.st_size;
+        uint64_t combined_size = stat_partition.st_size;
+        uint64_t tree_offset = stat_partition.st_size;
         uint16_t block_size = 4096;
         std::vector<uint32_t> hash_level_offsets;
         uint32_t tree_size;
@@ -164,7 +170,7 @@ int main(int argc, char **argv) {
         // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/libavb/avb_slot_verify.c#940
         size_t num_descriptors;
         size_t n;
-        bool dlkm_found = false;
+        bool partition_found = false;
         const AvbDescriptor** descriptors = avb_descriptor_get_all(buf_vbmeta, vbmeta_length, &num_descriptors);
         for (n = 0; n < num_descriptors; n++) {
             // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/libavb/avb_hash_descriptor.c#34
@@ -185,32 +191,32 @@ int main(int argc, char **argv) {
 
                     desc_partition_name = (const uint8_t*)descriptors[n] + sizeof(AvbHashtreeDescriptor);
 
-                    if (hashtree_desc.partition_name_len == 11 && strncmp((const char*)desc_partition_name, "vendor_dlkm", hashtree_desc.partition_name_len) == 0) {
-                        dlkm_desc_orig = (AvbHashtreeDescriptor*)descriptors[n];
-                        dlkm_desc = hashtree_desc;
-                        dlkm_found = true;
+                    if (hashtree_desc.partition_name_len == 11 && strncmp((const char*)desc_partition_name, partition_name, hashtree_desc.partition_name_len) == 0) {
+                        partition_desc_orig = (AvbHashtreeDescriptor*)descriptors[n];
+                        partition_desc = hashtree_desc;
+                        partition_found = true;
 
-                        dlkm_salt = desc_partition_name + hashtree_desc.partition_name_len;
-                        dlkm_digest = dlkm_salt + hashtree_desc.salt_len;
+                        partition_salt = desc_partition_name + hashtree_desc.partition_name_len;
+                        partition_digest = partition_salt + hashtree_desc.salt_len;
                     }
                 } break;
             }
-            if (dlkm_found) {
+            if (partition_found) {
                 break;
             }
         }
-        if (!dlkm_found) {
-            fprintf(stderr, "! vendor_dlkm descriptor missing\n");
+        if (!partition_found) {
+            fprintf(stderr, "! partition descriptor missing\n");
             exit(EXIT_FAILURE);
         }
 
         // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#3595
         // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/libavb/avb_slot_verify.c#1167
-        if (avb_strcmp((const char*)dlkm_desc.hash_algorithm, "sha1") == 0) {
+        if (avb_strcmp((const char*)partition_desc.hash_algorithm, "sha1") == 0) {
             digest_size = AVB_SHA1_DIGEST_SIZE;
-        } else if (avb_strcmp((const char*)dlkm_desc.hash_algorithm, "sha256") == 0) {
+        } else if (avb_strcmp((const char*)partition_desc.hash_algorithm, "sha256") == 0) {
             digest_size = AVB_SHA256_DIGEST_SIZE;
-        } else if (avb_strcmp((const char*)dlkm_desc.hash_algorithm, "sha512") == 0) {
+        } else if (avb_strcmp((const char*)partition_desc.hash_algorithm, "sha512") == 0) {
             digest_size = AVB_SHA512_DIGEST_SIZE;
         } else {
             fprintf(stderr, "! Unsupported hash algorithm\n");
@@ -232,7 +238,7 @@ int main(int argc, char **argv) {
         tree_size = calculated.second;
 
         // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#3691
-        auto generated = generate_hash_tree(buf_dlkm, image_size, block_size, digest_size, dlkm_salt, dlkm_desc.salt_len, digest_padding, hash_level_offsets, tree_size);
+        auto generated = generate_hash_tree(buf_partition, image_size, block_size, digest_size, partition_salt, partition_desc.salt_len, digest_padding, hash_level_offsets, tree_size);
         root_digest = generated.first;
         hash_tree = generated.second;
 
@@ -240,22 +246,22 @@ int main(int argc, char **argv) {
         tree_padding = round_to_multiple(tree_size, block_size) - tree_size;
         combined_size = tree_offset + tree_size + tree_padding;
 
-        munmap(addr_dlkm, tree_offset);
+        munmap(addr_partition, tree_offset);
 
-        if (ftruncate64(fd_dlkm, combined_size) != 0) { // NOLINT(cppcoreguidelines-narrowing-conversions)
-            fprintf(stderr, "! Unable to resize %s\n", dlkm_image);
+        if (ftruncate64(fd_partition, combined_size) != 0) { // NOLINT(cppcoreguidelines-narrowing-conversions)
+            fprintf(stderr, "! Unable to resize %s\n", partition_image);
             exit(EXIT_FAILURE);
         }
 
-        addr_dlkm = mmap(nullptr, combined_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_dlkm, 0);
-        if (addr_dlkm == MAP_FAILED) {
-            fprintf(stderr, "! Unable to mmap %s\n", dlkm_image);
+        addr_partition = mmap(nullptr, combined_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_partition, 0);
+        if (addr_partition == MAP_FAILED) {
+            fprintf(stderr, "! Unable to mmap %s\n", partition_image);
             exit(EXIT_FAILURE);
         }
 
-        buf_dlkm = static_cast<uint8_t *>(addr_dlkm);
-        memset(&buf_dlkm[tree_offset], 0, tree_size + tree_padding);
-        memcpy(&buf_dlkm[tree_offset], hash_tree.data(), tree_size);
+        buf_partition = static_cast<uint8_t *>(addr_partition);
+        memset(&buf_partition[tree_offset], 0, tree_size + tree_padding);
+        memcpy(&buf_partition[tree_offset], hash_tree.data(), tree_size);
 
         bool try_fec = false;
         fd_fec = open("fec", O_RDONLY);
@@ -273,7 +279,7 @@ int main(int argc, char **argv) {
 
             // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#4023
             char command[256];
-            sprintf(command, "./fec --encode --roots 2 \"%s\" %s > /dev/null 2>&1", dlkm_image, fec_filename);
+            sprintf(command, "./fec --encode --roots 2 \"%s\" %s > /dev/null 2>&1", partition_image, fec_filename);
             system(command);
 
             fd_fec = open(fec_filename, O_RDWR);
@@ -308,36 +314,36 @@ int main(int argc, char **argv) {
             fec_padding = round_to_multiple(fec_size, block_size) - fec_size;
             combined_size = fec_offset + fec_size + fec_padding;
 
-            munmap(addr_dlkm, fec_offset);
+            munmap(addr_partition, fec_offset);
 
-            if (ftruncate64(fd_dlkm, combined_size) != 0) { // NOLINT(cppcoreguidelines-narrowing-conversions)
-                fprintf(stderr, "! Unable to resize %s\n", dlkm_image);
+            if (ftruncate64(fd_partition, combined_size) != 0) { // NOLINT(cppcoreguidelines-narrowing-conversions)
+                fprintf(stderr, "! Unable to resize %s\n", partition_image);
                 exit(EXIT_FAILURE);
             }
 
-            addr_dlkm = mmap(nullptr, combined_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_dlkm, 0);
-            if (addr_dlkm == MAP_FAILED) {
-                fprintf(stderr, "! Unable to mmap %s\n", dlkm_image);
+            addr_partition = mmap(nullptr, combined_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_partition, 0);
+            if (addr_partition == MAP_FAILED) {
+                fprintf(stderr, "! Unable to mmap %s\n", partition_image);
                 exit(EXIT_FAILURE);
             }
 
-            buf_dlkm = static_cast<uint8_t *>(addr_dlkm);
-            memset(&buf_dlkm[fec_offset], 0, fec_size + fec_padding);
-            memcpy(&buf_dlkm[fec_offset], buf_fec, fec_size);
+            buf_partition = static_cast<uint8_t *>(addr_partition);
+            memset(&buf_partition[fec_offset], 0, fec_size + fec_padding);
+            memcpy(&buf_partition[fec_offset], buf_fec, fec_size);
 
             munmap(addr_fec, stat_fec.st_size);
             close(fd_fec);
             unlink(fec_filename);
         }
 
-        dlkm_desc.image_size = image_size;
-        dlkm_desc.tree_offset = tree_offset;
-        dlkm_desc.tree_size = tree_size + tree_padding;
-        dlkm_desc.fec_num_roots = fec_num_roots;
-        dlkm_desc.fec_offset = fec_offset;
-        dlkm_desc.fec_size = fec_size + fec_padding;
-        avb_hashtree_descriptor_byteunswap((const AvbHashtreeDescriptor*)&dlkm_desc, dlkm_desc_orig);
-        avb_memcpy((void *)dlkm_digest, root_digest.data(), root_digest.size());
+        partition_desc.image_size = image_size;
+        partition_desc.tree_offset = tree_offset;
+        partition_desc.tree_size = tree_size + tree_padding;
+        partition_desc.fec_num_roots = fec_num_roots;
+        partition_desc.fec_offset = fec_offset;
+        partition_desc.fec_size = fec_size + fec_padding;
+        avb_hashtree_descriptor_byteunswap((const AvbHashtreeDescriptor*)&partition_desc, partition_desc_orig);
+        avb_memcpy((void *)partition_digest, root_digest.data(), root_digest.size());
         printf("- Patching complete\n");
 
         printf(""
@@ -351,31 +357,36 @@ int main(int argc, char **argv) {
                "    FEC offset:            %" PRIu64 "\n"
                "    FEC size:              %" PRIu64 " bytes\n"
                "    Hash Algorithm:        %s\n"
-               "    Partition Name:        vendor_dlkm\n"
+               "    Partition Name:        %s\n"
                "    Salt:                  %s\n"
                "    Root Digest:           %s\n"
                "    Flags:                 %d\n",
-               image_size, image_size, tree_size, block_size, block_size, dlkm_desc.fec_num_roots, dlkm_desc.fec_offset, dlkm_desc.fec_size, (const char *)dlkm_desc.hash_algorithm,
-               mem_to_hexstring(dlkm_salt, dlkm_desc.salt_len).c_str(), mem_to_hexstring(root_digest.data(), root_digest.size()).c_str(), dlkm_desc.flags);
+               image_size, image_size, tree_size, block_size, block_size, partition_desc.fec_num_roots, partition_desc.fec_offset, partition_desc.fec_size, (const char *)partition_desc.hash_algorithm,
+               partition_name, mem_to_hexstring(partition_salt, partition_desc.salt_len).c_str(), mem_to_hexstring(root_digest.data(), root_digest.size()).c_str(), partition_desc.flags);
 
-        munmap(addr_dlkm, combined_size);
-        close(fd_dlkm);
+        munmap(addr_partition, combined_size);
+        close(fd_partition);
 
         munmap(addr_vbmeta, stat_vbmeta.st_size);
         close(fd_vbmeta);
 
         exit(EXIT_SUCCESS);
     } else if (strcmp(argv[1], "mount") == 0) {
-        auto vendor_dlkm_entry = find_vendor_dlkm_entry();
+        if (argc != 3) {
+            fprintf(stderr, "%s mount <partition-name>\n", command_name);
+            exit(EXIT_FAILURE);
+        }
+        auto partition_name = argv[2];
+        auto fstab_entry = find_fstab_entry(partition_name);
 
         // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr.cpp;l=1391
-        if (IsMountPointMounted(vendor_dlkm_entry.mount_point)) {
+        if (IsMountPointMounted(fstab_entry.mount_point)) {
             exit(EXIT_SUCCESS);
         }
 
         // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr.cpp;l=1432
-        if (vendor_dlkm_entry.fs_mgr_flags.logical) {
-            if (!fs_mgr_update_logical_partition(&vendor_dlkm_entry)) {
+        if (fstab_entry.fs_mgr_flags.logical) {
+            if (!fs_mgr_update_logical_partition(&fstab_entry)) {
                 fprintf(stderr, "! Could not set up logical partition\n");
                 exit(EXIT_FAILURE);
             }
@@ -383,51 +394,56 @@ int main(int argc, char **argv) {
 
         if (!are_flags_disabled()) {
             // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr.cpp;l=1450
-            if (vendor_dlkm_entry.fs_mgr_flags.avb) {
+            if (fstab_entry.fs_mgr_flags.avb) {
                 // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/libfs_avb/fs_avb.cpp;l=377
                 auto avb_handle = AvbHandle::LoadAndVerifyVbmeta("vbmeta", fs_mgr_get_slot_suffix(), fs_mgr_get_other_slot_suffix(), {}, HashAlgorithm::kSHA256, true, false, false, nullptr);
-                if (avb_handle->SetUpAvbHashtree(&vendor_dlkm_entry, true) == AvbHashtreeResult::kFail) {
-                    fprintf(stderr, "! Failed to set up AVB on partition: %s\n", vendor_dlkm_entry.mount_point.c_str());
+                if (avb_handle->SetUpAvbHashtree(&fstab_entry, true) == AvbHashtreeResult::kFail) {
+                    fprintf(stderr, "! Failed to set up AVB on partition: %s\n", fstab_entry.mount_point.c_str());
                     exit(EXIT_FAILURE);
                 }
-            } else if (!vendor_dlkm_entry.avb_keys.empty()) {
-                if (AvbHandle::SetUpStandaloneAvbHashtree(&vendor_dlkm_entry) == AvbHashtreeResult::kFail) {
-                    fprintf(stderr, "! Failed to set up AVB on standalone partition: %s\n", vendor_dlkm_entry.mount_point.c_str());
+            } else if (!fstab_entry.avb_keys.empty()) {
+                if (AvbHandle::SetUpStandaloneAvbHashtree(&fstab_entry) == AvbHashtreeResult::kFail) {
+                    fprintf(stderr, "! Failed to set up AVB on standalone partition: %s\n", fstab_entry.mount_point.c_str());
                     exit(EXIT_FAILURE);
                 }
             }
         }
 
-        if (fs_mgr_do_mount_one(vendor_dlkm_entry) != 0) {
-            fprintf(stderr, "! Failed to mount %s\n", vendor_dlkm_entry.mount_point.c_str());
+        if (fs_mgr_do_mount_one(fstab_entry) != 0) {
+            fprintf(stderr, "! Failed to mount %s\n", fstab_entry.mount_point.c_str());
             exit(EXIT_FAILURE);
         }
 
         exit(EXIT_SUCCESS);
     } else if (strcmp(argv[1], "umount") == 0) {
-        auto vendor_dlkm_entry = find_vendor_dlkm_entry();
+        if (argc != 3) {
+            fprintf(stderr, "%s umount <partition-name>\n", command_name);
+            exit(EXIT_FAILURE);
+        }
+        auto partition_name = argv[2];
+        auto fstab_entry = find_fstab_entry(partition_name);
 
         // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr.cpp;l=1650
-        if (!IsMountPointMounted(vendor_dlkm_entry.mount_point)) {
+        if (!IsMountPointMounted(fstab_entry.mount_point)) {
             exit(EXIT_SUCCESS);
         }
 
-        if (umount(vendor_dlkm_entry.mount_point.c_str()) == -1) {
-            fprintf(stderr, "! Failed to umount %s\n", vendor_dlkm_entry.mount_point.c_str());
+        if (umount(fstab_entry.mount_point.c_str()) == -1) {
+            fprintf(stderr, "! Failed to umount %s\n", fstab_entry.mount_point.c_str());
             exit(EXIT_FAILURE);
         }
 
-        if (vendor_dlkm_entry.fs_mgr_flags.logical) {
-            if (!fs_mgr_update_logical_partition(&vendor_dlkm_entry)) {
+        if (fstab_entry.fs_mgr_flags.logical) {
+            if (!fs_mgr_update_logical_partition(&fstab_entry)) {
                 fprintf(stderr, "! Could not get logical partition blk_device\n");
                 exit(EXIT_FAILURE);
             }
         }
 
         if (!are_flags_disabled()) {
-            if (vendor_dlkm_entry.fs_mgr_flags.avb || !vendor_dlkm_entry.avb_keys.empty()) {
-                if (!AvbHandle::TearDownAvbHashtree(&vendor_dlkm_entry, true /* wait */)) {
-                    fprintf(stderr, "! Failed to tear down AVB on mount point: %s\n", vendor_dlkm_entry.mount_point.c_str());
+            if (fstab_entry.fs_mgr_flags.avb || !fstab_entry.avb_keys.empty()) {
+                if (!AvbHandle::TearDownAvbHashtree(&fstab_entry, true)) {
+                    fprintf(stderr, "! Failed to tear down AVB on mount point: %s\n", fstab_entry.mount_point.c_str());
                     exit(EXIT_FAILURE);
                 }
             }
@@ -461,7 +477,7 @@ bool are_flags_disabled() {
     }
 }
 
-FstabEntry find_vendor_dlkm_entry() {
+FstabEntry find_fstab_entry(char* partition_name) {
     // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/init/first_stage_mount.cpp#241
     // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/fastboot/device/fastboot_device.cpp#82
     // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/fs_mgr/include_fstab/fstab/fstab.h#96
@@ -471,13 +487,15 @@ FstabEntry find_vendor_dlkm_entry() {
         exit(EXIT_FAILURE);
     }
 
+    auto partition_name_slotted = std::string(partition_name) + fs_mgr_get_slot_suffix();
+
     // https://android.googlesource.com/platform/system/core/+/refs/tags/android-12.0.0_r12/init/first_stage_mount.cpp#513
-    auto it = std::find_if(fstab.begin(), fstab.end(), [](const auto& entry) {
-        return entry.mount_point == "/vendor_dlkm";
+    auto it = std::find_if(fstab.begin(), fstab.end(), [partition_name_slotted](const auto& entry) {
+        return basename(entry.blk_device.c_str()) == partition_name_slotted;
     });
 
     if (it == fstab.end()) {
-        fprintf(stderr, "! Unable to find vendor_dlkm in fstab\n");
+        fprintf(stderr, "! Unable to find %s in fstab\n", partition_name);
         exit(EXIT_FAILURE);
     }
 

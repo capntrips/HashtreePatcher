@@ -6,10 +6,10 @@ It also has tools for checking if verity and verification are disabled in the to
 ## Usage
 
 ```bash
-httools patch <vendor_dlkm.img> <vbmeta.img>
+httools patch <partition-name> <partition.img> <vbmeta.img>
 ```
 
-A hashtree footer is appended to the `vendor_dlkm` image, and the `vendor_dlkm` hashtree descriptor in the `vbmeta` image is patched
+A hashtree footer is appended to the partition image, and the specified hashtree descriptor in the `vbmeta` image is patched
 with the relevant values. Both images are patched in place.
 
 ### FEC
@@ -21,13 +21,25 @@ If the `fec` binary is present in the working directory, it will be used to gene
 httools avb <partition-name>
 ```
 
-Checks if the given partition has an `avb` fs option, the value of which is printed, if so.
+Checks if the partition has an `avb` fs option, the value of which is printed, if so.
 
 ```bash
 httools disable-flags
 ```
 
-Checks if verity and verification are disabled in the top-level `vbmeta`.
+Checks if verity or verification are disabled in the top-level `vbmeta`.
+
+```bash
+httools mount <partition-name>
+```
+
+Mounts the partition, with a hashtree if verity and verification are enabled.
+
+```bash
+httools umount <partition-name>
+```
+
+Unmounts the partition and tears down its hashtree if verity and verification are enabled.
 
 ```bash
 httools --version
