@@ -37,14 +37,22 @@ int main(int argc, char **argv) {
     char *command_name = argv[0];
 
     if (argc <= 1) {
-        fprintf(stderr, "%s [-v|--version] [avb|disable-flags|patch|mount|umount]\n", command_name);
+        fprintf(stderr, "%s [-v|--version] [exists|avb|disable-flags|patch|mount|umount]\n", command_name);
         exit(EXIT_SUCCESS);
     } else if (argc == 2 && (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-v") == 0)) {
         fprintf(stderr, "%s %s\n", command_name, version);
         exit(EXIT_SUCCESS);
     }
 
-    if (strcmp(argv[1], "avb") == 0) {
+    if (strcmp(argv[1], "exists") == 0) {
+        if (argc != 3) {
+            fprintf(stderr, "%s avb <partition-name>\n", command_name);
+            exit(EXIT_FAILURE);
+        }
+        auto partition_name = argv[2];
+        find_fstab_entry(partition_name);
+        exit(EXIT_SUCCESS);
+    } else if (strcmp(argv[1], "avb") == 0) {
         if (argc != 3) {
             fprintf(stderr, "%s avb <partition-name>\n", command_name);
             exit(EXIT_FAILURE);
@@ -423,6 +431,7 @@ int main(int argc, char **argv) {
         auto partition_name = argv[2];
         auto fstab_entry = find_fstab_entry(partition_name);
 
+
         // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr.cpp;l=1650
         if (!IsMountPointMounted(fstab_entry.mount_point)) {
             exit(EXIT_SUCCESS);
@@ -451,7 +460,7 @@ int main(int argc, char **argv) {
 
         exit(EXIT_SUCCESS);
     } else {
-        fprintf(stderr, "%s [-v|--version] [avb|disable-flags|patch|mount|umount]\n", command_name);
+        fprintf(stderr, "%s [-v|--version] [exists|avb|disable-flags|patch|mount|umount]\n", command_name);
         exit(EXIT_FAILURE);
     }
 }

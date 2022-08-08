@@ -6,7 +6,7 @@ using android::fs_mgr::FstabEntry;
 
 bool are_flags_disabled();
 FstabEntry find_fstab_entry(char* partition_name);
-static bool IsMountPointMounted(const std::string& mount_point);
+static bool IsMountPointMounted(const std::string&   mount_point);
 
 // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/test/avb_unittest_util.h#35
 // Encodes |len| bytes of |data| as a lower-case hex-string.
