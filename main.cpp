@@ -17,6 +17,7 @@
 #include <fec/io.h>
 #include <fs_avb/fs_avb.h>
 #include <fs_mgr.h>
+#include <json/json.h>
 #include <libavb/libavb.h>
 #include <openssl/sha.h>
 
@@ -37,7 +38,7 @@ int main(int argc, char **argv) {
     char *command_name = argv[0];
 
     if (argc <= 1) {
-        fprintf(stderr, "%s [-v|--version] [exists|avb|disable-flags|patch|mount|umount]\n", command_name);
+        fprintf(stderr, "%s [-v|--version] [exists|dump|avb|disable-flags|patch|mount|umount]\n", command_name);
         exit(EXIT_SUCCESS);
     } else if (argc == 2 && (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-v") == 0)) {
         fprintf(stderr, "%s %s\n", command_name, version);
@@ -51,6 +52,53 @@ int main(int argc, char **argv) {
         }
         auto partition_name = argv[2];
         find_fstab_entry(partition_name);
+        exit(EXIT_SUCCESS);
+    } else if (strcmp(argv[1], "dump") == 0) {
+        if (argc != 3) {
+            fprintf(stderr, "%s avb <partition-name>\n", command_name);
+            exit(EXIT_FAILURE);
+        }
+        auto partition_name = argv[2];
+        auto fstab_entry = find_fstab_entry(partition_name);
+
+        // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr.cpp;l=1432-1437
+        if (fstab_entry.fs_mgr_flags.logical) {
+            if (!fs_mgr_update_logical_partition(&fstab_entry)) {
+                fprintf(stderr, "! Could not set up logical partition\n");
+                exit(EXIT_FAILURE);
+            }
+        }
+
+        Json::Value root;
+        Json::Value fsMgrFlags;
+
+        // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr_fstab.cpp;l=469-485
+        root["blkDevice"] = fstab_entry.blk_device;
+        root["mountPoint"] = fstab_entry.mount_point;
+        root["fsType"] = fstab_entry.fs_type;
+
+        // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr_fstab.cpp;l=176
+        // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr_fstab.cpp;l=504-506
+        if (fstab_entry.fs_mgr_flags.logical) {
+            fsMgrFlags["logical"] = true;
+            root["logicalPartitionName"] = fstab_entry.logical_partition_name;
+        }
+
+        // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr_fstab.cpp;l=175
+        // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr_fstab.cpp;l=284-288
+        if (fstab_entry.fs_mgr_flags.avb) {
+            root["avb"] = true;
+            root["vbmetaPartition"] = fstab_entry.vbmeta_partition;
+        } else if (!fstab_entry.avb_keys.empty()) {
+            root["avbKeys"] = fstab_entry.avb_keys;
+        }
+
+        root["fsMgrFlags"] = fsMgrFlags;
+
+        Json::StreamWriterBuilder wbuilder;
+        wbuilder["indentation"] = "";
+        std::string document = Json::writeString(wbuilder, root);
+        printf("%s\n", document.c_str());
         exit(EXIT_SUCCESS);
     } else if (strcmp(argv[1], "avb") == 0) {
         if (argc != 3) {
@@ -460,7 +508,7 @@ int main(int argc, char **argv) {
 
         exit(EXIT_SUCCESS);
     } else {
-        fprintf(stderr, "%s [-v|--version] [exists|avb|disable-flags|patch|mount|umount]\n", command_name);
+        fprintf(stderr, "%s [-v|--version] [exists|dump|avb|disable-flags|patch|mount|umount]\n", command_name);
         exit(EXIT_FAILURE);
     }
 }
