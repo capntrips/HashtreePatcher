@@ -63,10 +63,7 @@ int main(int argc, char **argv) {
 
         // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr.cpp;l=1432-1437
         if (fstab_entry.fs_mgr_flags.logical) {
-            if (!fs_mgr_update_logical_partition(&fstab_entry)) {
-                fprintf(stderr, "! Could not set up logical partition\n");
-                exit(EXIT_FAILURE);
-            }
+            fs_mgr_update_logical_partition(&fstab_entry);
         }
 
         Json::Value root;
