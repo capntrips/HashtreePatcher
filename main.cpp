@@ -127,16 +127,14 @@ int main(int argc, char **argv) {
 
         int fd_partition;
         int fd_vbmeta;
-        int fd_fec;
         struct stat stat_partition; // NOLINT(cppcoreguidelines-pro-type-member-init)
         struct stat stat_vbmeta; // NOLINT(cppcoreguidelines-pro-type-member-init)
-        struct stat stat_fec; // NOLINT(cppcoreguidelines-pro-type-member-init)
         void *addr_partition;
         void *addr_vbmeta;
-        void *addr_fec;
         uint8_t *buf_partition;
+        uint8_t *buf_partition_footer;
         uint8_t *buf_vbmeta;
-        uint8_t *buf_fec;
+        uint64_t size_partition;
         uint64_t size_vbmeta;
 
         auto partition_name = argv[2];
@@ -155,7 +153,14 @@ int main(int argc, char **argv) {
             exit(EXIT_FAILURE);
         }
 
-        addr_partition = mmap(nullptr, stat_partition.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_partition, 0);
+        // https://github.com/topjohnwu/Magisk/blob/6ef86d8d20ceb4674c02e334a53aaee22c090ea6/native/jni/base/files.cpp#L511
+        if (S_ISBLK(stat_partition.st_mode)) {
+            ioctl(fd_partition, BLKGETSIZE64, &size_partition);
+        } else {
+            size_partition = stat_partition.st_size;
+        }
+
+        addr_partition = mmap(nullptr, size_partition, PROT_READ | PROT_WRITE, MAP_SHARED, fd_partition, 0);
         if (addr_partition == MAP_FAILED) {
             fprintf(stderr, "! Unable to mmap %s\n", partition_image);
             exit(EXIT_FAILURE);
@@ -186,30 +191,18 @@ int main(int argc, char **argv) {
         }
 
         buf_partition = static_cast<uint8_t *>(addr_partition);
+        buf_partition_footer = buf_partition + size_partition - AVB_FOOTER_SIZE;
         buf_vbmeta = static_cast<uint8_t *>(addr_vbmeta);
 
         const uint8_t* header_block = buf_vbmeta;
         AvbVBMetaImageHeader vbmeta_header;
         size_t vbmeta_length;
+        AvbDescriptor desc;
         AvbHashtreeDescriptor* partition_desc_orig;
         AvbHashtreeDescriptor partition_desc;
+        const uint8_t* desc_partition_name;
         const uint8_t* partition_salt;
         const uint8_t* partition_digest;
-        uint8_t digest_size;
-        uint8_t digest_padding;
-        uint64_t image_size = stat_partition.st_size;
-        uint64_t combined_size = stat_partition.st_size;
-        uint64_t tree_offset = stat_partition.st_size;
-        uint16_t block_size = 4096;
-        std::vector<uint32_t> hash_level_offsets;
-        uint32_t tree_size;
-        uint16_t tree_padding;
-        uint32_t fec_offset = 0;
-        std::vector<uint8_t> root_digest;
-        std::vector<uint8_t> hash_tree;
-        uint32_t fec_size = 0;
-        uint16_t fec_padding = 0;
-        uint32_t fec_num_roots = 0;
 
         // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/libavb/avb_vbmeta_image.c#63
         if (avb_safe_memcmp(header_block, AVB_MAGIC, AVB_MAGIC_LEN) != 0) {
@@ -227,7 +220,6 @@ int main(int argc, char **argv) {
         const AvbDescriptor** descriptors = avb_descriptor_get_all(buf_vbmeta, vbmeta_length, &num_descriptors);
         for (n = 0; n < num_descriptors; n++) {
             // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/libavb/avb_hash_descriptor.c#34
-            AvbDescriptor desc;
             if (!avb_descriptor_validate_and_byteswap(descriptors[n], &desc)) {
                 fprintf(stderr, "! Descriptor is invalid\n");
                 exit(EXIT_FAILURE);
@@ -236,7 +228,6 @@ int main(int argc, char **argv) {
                 case AVB_DESCRIPTOR_TAG_HASHTREE: {
                     // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/libavb/avb_slot_verify.c#1121
                     AvbHashtreeDescriptor hashtree_desc;
-                    const uint8_t* desc_partition_name;
                     if (!avb_hashtree_descriptor_validate_and_byteswap((AvbHashtreeDescriptor*)descriptors[n], &hashtree_desc)) {
                         fprintf(stderr, "! Hashtree descriptor is invalid\n");
                         exit(EXIT_FAILURE);
@@ -263,164 +254,285 @@ int main(int argc, char **argv) {
             exit(EXIT_FAILURE);
         }
 
-        // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#3595
-        // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/libavb/avb_slot_verify.c#1167
-        if (avb_strcmp((const char*)partition_desc.hash_algorithm, "sha1") == 0) {
-            digest_size = AVB_SHA1_DIGEST_SIZE;
-        } else if (avb_strcmp((const char*)partition_desc.hash_algorithm, "sha256") == 0) {
-            digest_size = AVB_SHA256_DIGEST_SIZE;
-        } else if (avb_strcmp((const char*)partition_desc.hash_algorithm, "sha512") == 0) {
-            digest_size = AVB_SHA512_DIGEST_SIZE;
-        } else {
-            fprintf(stderr, "! Unsupported hash algorithm\n");
-            exit(EXIT_FAILURE);
-        }
+        // https://cs.android.com/android/platform/superproject/+/android-13.0.0_r31:external/avb/libavb/avb_footer.c;l=38
+        if (avb_safe_memcmp(buf_partition_footer, AVB_FOOTER_MAGIC, AVB_FOOTER_MAGIC_LEN) != 0) {
+            int fd_fec;
+            struct stat stat_fec; // NOLINT(cppcoreguidelines-pro-type-member-init)
+            void *addr_fec;
+            uint8_t *buf_fec;
 
-        digest_padding = round_to_pow2(digest_size) - digest_size;
+            uint8_t digest_size;
+            uint8_t digest_padding;
+            uint64_t image_size = stat_partition.st_size;
+            uint64_t tree_offset = stat_partition.st_size;
+            uint16_t block_size = 4096;
+            std::vector<uint32_t> hash_level_offsets;
+            uint32_t tree_size;
+            uint16_t tree_padding;
+            uint32_t fec_offset = 0;
+            std::vector<uint8_t> root_digest;
+            std::vector<uint8_t> hash_tree;
+            uint32_t fec_size = 0;
+            uint16_t fec_padding = 0;
+            uint32_t fec_num_roots = 0;
 
-        // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#3630
-        // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#771
-        if (image_size % block_size != 0) {
-            fprintf(stderr, "! File size of %" PRIu64 " is not a multiple of the image block size %u\n", image_size, block_size);
-            exit(EXIT_FAILURE);
-        }
-
-        // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#3679
-        auto calculated = calc_hash_level_offsets(image_size, block_size, digest_size + digest_padding);
-        hash_level_offsets = calculated.first;
-        tree_size = calculated.second;
-
-        // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#3691
-        auto generated = generate_hash_tree(buf_partition, image_size, block_size, digest_size, partition_salt, partition_desc.salt_len, digest_padding, hash_level_offsets, tree_size);
-        root_digest = generated.first;
-        hash_tree = generated.second;
-
-        // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#3720
-        tree_padding = round_to_multiple(tree_size, block_size) - tree_size;
-        combined_size = tree_offset + tree_size + tree_padding;
-
-        munmap(addr_partition, tree_offset);
-
-        if (ftruncate64(fd_partition, combined_size) != 0) { // NOLINT(cppcoreguidelines-narrowing-conversions)
-            fprintf(stderr, "! Unable to resize %s\n", partition_image);
-            exit(EXIT_FAILURE);
-        }
-
-        addr_partition = mmap(nullptr, combined_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_partition, 0);
-        if (addr_partition == MAP_FAILED) {
-            fprintf(stderr, "! Unable to mmap %s\n", partition_image);
-            exit(EXIT_FAILURE);
-        }
-
-        buf_partition = static_cast<uint8_t *>(addr_partition);
-        memset(&buf_partition[tree_offset], 0, tree_size + tree_padding);
-        memcpy(&buf_partition[tree_offset], hash_tree.data(), tree_size);
-
-        bool try_fec = false;
-        fd_fec = open("fec", O_RDONLY);
-        if (fd_fec != -1) {
-            if (fstat(fd_fec, &stat_fec) != -1) {
-                if (stat_fec.st_mode & S_IXUSR) {
-                    try_fec = true;
-                }
-            }
-            close(fd_fec);
-        }
-        if (try_fec) {
-            fec_offset = combined_size;
-            const char *fec_filename = "fec.bin";
-
-            // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#4023
-            char command[256];
-            sprintf(command, "./fec --encode --roots 2 \"%s\" %s > /dev/null 2>&1", partition_image, fec_filename);
-            system(command);
-
-            fd_fec = open(fec_filename, O_RDWR);
-            if (fd_fec == -1) {
-                fprintf(stderr, "! Unable to open %s\n", fec_filename);
+            // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#3595
+            // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/libavb/avb_slot_verify.c#1167
+            if (avb_strcmp((const char*)partition_desc.hash_algorithm, "sha1") == 0) {
+                digest_size = AVB_SHA1_DIGEST_SIZE;
+            } else if (avb_strcmp((const char*)partition_desc.hash_algorithm, "sha256") == 0) {
+                digest_size = AVB_SHA256_DIGEST_SIZE;
+            } else if (avb_strcmp((const char*)partition_desc.hash_algorithm, "sha512") == 0) {
+                digest_size = AVB_SHA512_DIGEST_SIZE;
+            } else {
+                fprintf(stderr, "! Unsupported hash algorithm\n");
                 exit(EXIT_FAILURE);
             }
 
-            if (fstat(fd_fec, &stat_fec) == -1) {
-                fprintf(stderr, "! Unable to fstat %s\n", fec_filename);
+            digest_padding = round_to_pow2(digest_size) - digest_size;
+
+            // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#3630
+            // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#771
+            if (image_size % block_size != 0) {
+                fprintf(stderr, "! File size of %" PRIu64 " is not a multiple of the image block size %u\n", image_size, block_size);
                 exit(EXIT_FAILURE);
             }
 
-            addr_fec = mmap(nullptr, stat_fec.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_fec, 0);
-            if (addr_fec == MAP_FAILED) {
-                fprintf(stderr, "! Unable to mmap %s\n", fec_filename);
-                exit(EXIT_FAILURE);
-            }
+            // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#3679
+            auto calculated = calc_hash_level_offsets(image_size, block_size, digest_size + digest_padding);
+            hash_level_offsets = calculated.first;
+            tree_size = calculated.second;
 
-            buf_fec = static_cast<uint8_t *>(addr_fec);
+            // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#3691
+            auto generated = generate_hash_tree(buf_partition, image_size, block_size, digest_size, partition_salt, partition_desc.salt_len, digest_padding, hash_level_offsets, tree_size);
+            root_digest = generated.first;
+            hash_tree = generated.second;
 
-            auto *footer = reinterpret_cast<fec_header *>(&buf_fec[stat_fec.st_size - sizeof(fec_header)]);
-            if (footer->magic != FEC_MAGIC) {
-                fprintf(stderr, "! Header magic is incorrect\n");
-                exit(EXIT_FAILURE);
-            }
+            // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#3720
+            tree_padding = round_to_multiple(tree_size, block_size) - tree_size;
 
-            fec_size = footer->fec_size;
-            fec_num_roots = footer->roots;
+            munmap(addr_partition, size_partition);
+            size_partition += tree_size + tree_padding;
 
-            // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#4023
-            fec_padding = round_to_multiple(fec_size, block_size) - fec_size;
-            combined_size = fec_offset + fec_size + fec_padding;
-
-            munmap(addr_partition, fec_offset);
-
-            if (ftruncate64(fd_partition, combined_size) != 0) { // NOLINT(cppcoreguidelines-narrowing-conversions)
+            if (ftruncate64(fd_partition, size_partition) != 0) { // NOLINT(cppcoreguidelines-narrowing-conversions)
                 fprintf(stderr, "! Unable to resize %s\n", partition_image);
                 exit(EXIT_FAILURE);
             }
 
-            addr_partition = mmap(nullptr, combined_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_partition, 0);
+            addr_partition = mmap(nullptr, size_partition, PROT_READ | PROT_WRITE, MAP_SHARED, fd_partition, 0);
             if (addr_partition == MAP_FAILED) {
                 fprintf(stderr, "! Unable to mmap %s\n", partition_image);
                 exit(EXIT_FAILURE);
             }
 
             buf_partition = static_cast<uint8_t *>(addr_partition);
-            memset(&buf_partition[fec_offset], 0, fec_size + fec_padding);
-            memcpy(&buf_partition[fec_offset], buf_fec, fec_size);
+            memset(&buf_partition[tree_offset], 0, tree_size + tree_padding);
+            memcpy(&buf_partition[tree_offset], hash_tree.data(), tree_size);
 
-            munmap(addr_fec, stat_fec.st_size);
-            close(fd_fec);
-            unlink(fec_filename);
+            bool try_fec = false;
+            fd_fec = open("fec", O_RDONLY);
+            if (fd_fec != -1) {
+                if (fstat(fd_fec, &stat_fec) != -1) {
+                    if (stat_fec.st_mode & S_IXUSR) {
+                        try_fec = true;
+                    }
+                }
+                close(fd_fec);
+            }
+            if (try_fec) {
+                fec_offset = size_partition;
+                const char *fec_filename = "fec.bin";
+
+                // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#4023
+                char command[256];
+                sprintf(command, "./fec --encode --roots 2 \"%s\" %s > /dev/null 2>&1", partition_image, fec_filename);
+                system(command);
+
+                fd_fec = open(fec_filename, O_RDWR);
+                if (fd_fec == -1) {
+                    fprintf(stderr, "! Unable to open %s\n", fec_filename);
+                    exit(EXIT_FAILURE);
+                }
+
+                if (fstat(fd_fec, &stat_fec) == -1) {
+                    fprintf(stderr, "! Unable to fstat %s\n", fec_filename);
+                    exit(EXIT_FAILURE);
+                }
+
+                addr_fec = mmap(nullptr, stat_fec.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_fec, 0);
+                if (addr_fec == MAP_FAILED) {
+                    fprintf(stderr, "! Unable to mmap %s\n", fec_filename);
+                    exit(EXIT_FAILURE);
+                }
+
+                buf_fec = static_cast<uint8_t *>(addr_fec);
+
+                auto *footer = reinterpret_cast<fec_header *>(&buf_fec[stat_fec.st_size - sizeof(fec_header)]);
+                if (footer->magic != FEC_MAGIC) {
+                    fprintf(stderr, "! Header magic is incorrect\n");
+                    exit(EXIT_FAILURE);
+                }
+
+                fec_size = footer->fec_size;
+                fec_num_roots = footer->roots;
+
+                // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/avbtool.py#4023
+                fec_padding = round_to_multiple(fec_size, block_size) - fec_size;
+
+                munmap(addr_partition, size_partition);
+                size_partition += fec_size + fec_padding;
+
+                if (ftruncate64(fd_partition, size_partition) != 0) { // NOLINT(cppcoreguidelines-narrowing-conversions)
+                    fprintf(stderr, "! Unable to resize %s\n", partition_image);
+                    exit(EXIT_FAILURE);
+                }
+
+                addr_partition = mmap(nullptr, size_partition, PROT_READ | PROT_WRITE, MAP_SHARED, fd_partition, 0);
+                if (addr_partition == MAP_FAILED) {
+                    fprintf(stderr, "! Unable to mmap %s\n", partition_image);
+                    exit(EXIT_FAILURE);
+                }
+
+                buf_partition = static_cast<uint8_t *>(addr_partition);
+                memset(&buf_partition[fec_offset], 0, fec_size + fec_padding);
+                memcpy(&buf_partition[fec_offset], buf_fec, fec_size);
+
+                munmap(addr_fec, stat_fec.st_size);
+                close(fd_fec);
+                unlink(fec_filename);
+            }
+
+            partition_desc.image_size = image_size;
+            partition_desc.tree_offset = tree_offset;
+            partition_desc.tree_size = tree_size + tree_padding;
+            partition_desc.fec_num_roots = fec_num_roots;
+            partition_desc.fec_offset = fec_offset;
+            partition_desc.fec_size = fec_size + fec_padding;
+            avb_hashtree_descriptor_byteunswap((const AvbHashtreeDescriptor*)&partition_desc, partition_desc_orig);
+            avb_memcpy((void *)partition_digest, root_digest.data(), root_digest.size());
+        } else {
+            AvbFooter vbmeta_footer;
+            AvbHashtreeDescriptor nested_desc;
+            const uint8_t* nested_salt;
+            const uint8_t* nested_digest;
+
+            // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/libavb/avb_slot_verify.c#661
+            if (!avb_footer_validate_and_byteswap((const AvbFooter*)buf_partition_footer, &vbmeta_footer)) {
+                fprintf(stderr, "! Footer is invalid\n");
+                exit(EXIT_FAILURE);
+            }
+
+            header_block = buf_partition + vbmeta_footer.vbmeta_offset;
+
+            // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/libavb/avb_vbmeta_image.c#63
+            if (avb_safe_memcmp(header_block, AVB_MAGIC, AVB_MAGIC_LEN) != 0) {
+                fprintf(stderr, "! Header magic is incorrect\n");
+                exit(EXIT_FAILURE);
+            }
+
+            avb_vbmeta_image_header_to_host_byte_order((AvbVBMetaImageHeader*)(header_block), &vbmeta_header);
+            vbmeta_length = sizeof(AvbVBMetaImageHeader) + vbmeta_header.authentication_data_block_size + vbmeta_header.auxiliary_data_block_size;
+
+            if (vbmeta_length != vbmeta_footer.vbmeta_size) {
+                fprintf(stderr, "! Vbmeta size mismatch\n");
+                exit(EXIT_FAILURE);
+            }
+
+            descriptors = avb_descriptor_get_all(header_block, vbmeta_length, &num_descriptors);
+            if (num_descriptors != 1) {
+                fprintf(stderr, "! Unexpected descriptor count\n");
+                exit(EXIT_FAILURE);
+            }
+
+            // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/libavb/avb_hash_descriptor.c#34
+            if (!avb_descriptor_validate_and_byteswap(descriptors[0], &desc)) {
+                fprintf(stderr, "! Descriptor is invalid\n");
+                exit(EXIT_FAILURE);
+            }
+
+            if (desc.tag != AVB_DESCRIPTOR_TAG_HASHTREE) {
+                fprintf(stderr, "! Unexpected descriptor tag\n");
+                exit(EXIT_FAILURE);
+            }
+
+            // https://android.googlesource.com/platform/external/avb/+/refs/tags/android-12.0.0_r12/libavb/avb_slot_verify.c#1121
+            if (!avb_hashtree_descriptor_validate_and_byteswap((AvbHashtreeDescriptor*)descriptors[0], &nested_desc)) {
+                fprintf(stderr, "! Hashtree descriptor is invalid\n");
+                exit(EXIT_FAILURE);
+            }
+
+            desc_partition_name = (const uint8_t*)descriptors[0] + sizeof(AvbHashtreeDescriptor);
+
+            if (nested_desc.partition_name_len != strlen(partition_name) || strncmp((const char*)desc_partition_name, partition_name, nested_desc.partition_name_len) != 0) {
+                fprintf(stderr, "! Unexpected descriptor name\n");
+                exit(EXIT_FAILURE);
+            }
+
+            if (partition_desc.salt_len != nested_desc.salt_len) {
+                fprintf(stderr, "! Unexpected salt length tag\n");
+                exit(EXIT_FAILURE);
+            }
+
+            if (partition_desc.root_digest_len != nested_desc.root_digest_len) {
+                fprintf(stderr, "! Unexpected digest length tag\n");
+                exit(EXIT_FAILURE);
+            }
+
+            nested_salt = desc_partition_name + nested_desc.partition_name_len;
+            nested_digest = nested_salt + nested_desc.salt_len;
+
+            partition_desc.image_size = nested_desc.image_size;
+            partition_desc.tree_offset = nested_desc.tree_offset;
+            partition_desc.tree_size = nested_desc.tree_size;
+            partition_desc.fec_num_roots = nested_desc.fec_num_roots;
+            partition_desc.fec_offset = nested_desc.fec_offset;
+            partition_desc.fec_size = nested_desc.fec_size;
+
+            avb_memcpy((void *)partition_desc.hash_algorithm, nested_desc.hash_algorithm, sizeof nested_desc.hash_algorithm);
+
+            avb_memcpy((void *)partition_salt, nested_salt, nested_desc.salt_len);
+            avb_memcpy((void *)partition_digest, nested_digest, nested_desc.root_digest_len);
         }
 
-        partition_desc.image_size = image_size;
-        partition_desc.tree_offset = tree_offset;
-        partition_desc.tree_size = tree_size + tree_padding;
-        partition_desc.fec_num_roots = fec_num_roots;
-        partition_desc.fec_offset = fec_offset;
-        partition_desc.fec_size = fec_size + fec_padding;
-        avb_hashtree_descriptor_byteunswap((const AvbHashtreeDescriptor*)&partition_desc, partition_desc_orig);
-        avb_memcpy((void *)partition_digest, root_digest.data(), root_digest.size());
+        avb_hashtree_descriptor_byteunswap((const AvbHashtreeDescriptor*)&partition_desc, (AvbHashtreeDescriptor *)partition_desc_orig);
         printf("- Patching complete\n");
 
         printf(""
                "    Hashtree descriptor:\n"
-               "    Image Size:            %" PRIu64 " bytes\n"
-               "    Tree Offset:           %" PRIu64 "\n"
-               "    Tree Size:             %d bytes\n"
-               "    Data Block Size:       %d bytes\n"
-               "    Hash Block Size:       %d bytes\n"
-               "    FEC num roots:         %d\n"
-               "    FEC offset:            %" PRIu64 "\n"
-               "    FEC size:              %" PRIu64 " bytes\n"
-               "    Hash Algorithm:        %s\n"
-               "    Partition Name:        %s\n"
-               "    Salt:                  %s\n"
-               "    Root Digest:           %s\n"
-               "    Flags:                 %d\n",
-               image_size, image_size, tree_size, block_size, block_size, partition_desc.fec_num_roots, partition_desc.fec_offset, partition_desc.fec_size, (const char *)partition_desc.hash_algorithm,
-               partition_name, mem_to_hexstring(partition_salt, partition_desc.salt_len).c_str(), mem_to_hexstring(root_digest.data(), root_digest.size()).c_str(), partition_desc.flags);
+               "      Version of dm-verity:  %d\n"
+               "      Image Size:            %" PRIu64 " bytes\n"
+               "      Tree Offset:           %" PRIu64 "\n"
+               "      Tree Size:             %" PRIu64 " bytes\n"
+               "      Data Block Size:       %d bytes\n"
+               "      Hash Block Size:       %d bytes\n"
+               "      FEC num roots:         %d\n"
+               "      FEC offset:            %" PRIu64 "\n"
+               "      FEC size:              %" PRIu64 " bytes\n"
+               "      Hash Algorithm:        %s\n"
+               "      Partition Name:        %s\n"
+               "      Salt:                  %s\n"
+               "      Root Digest:           %s\n"
+               "      Flags:                 %d\n",
+               partition_desc.dm_verity_version,
+               partition_desc.image_size,
+               partition_desc.tree_offset,
+               partition_desc.tree_size,
+               partition_desc.data_block_size,
+               partition_desc.hash_block_size,
+               partition_desc.fec_num_roots,
+               partition_desc.fec_offset,
+               partition_desc.fec_size,
+               (const char *)partition_desc.hash_algorithm,
+               partition_name,
+               mem_to_hexstring(partition_salt, partition_desc.salt_len).c_str(),
+               mem_to_hexstring(partition_digest, partition_desc.root_digest_len).c_str(),
+               partition_desc.flags
+        );
 
-        munmap(addr_partition, combined_size);
+        munmap(addr_partition, size_partition);
         close(fd_partition);
 
-        munmap(addr_vbmeta, stat_vbmeta.st_size);
+        munmap(addr_vbmeta, size_vbmeta);
         close(fd_vbmeta);
 
         exit(EXIT_SUCCESS);
@@ -475,7 +587,6 @@ int main(int argc, char **argv) {
         }
         auto partition_name = argv[2];
         auto fstab_entry = find_fstab_entry(partition_name);
-
 
         // https://cs.android.com/android/platform/superproject/+/android-12.1.0_r8:system/core/fs_mgr/fs_mgr.cpp;l=1650
         if (!IsMountPointMounted(fstab_entry.mount_point)) {
