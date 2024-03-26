@@ -1,47 +1,12 @@
-cc_binary {
-    name: "httools",
-    srcs: [
-        "main.cpp",
-    ],
-    shared_libs: [
-        "libcrypto",
-        "libfec",
-        "libfs_mgr",
-        "libjsoncpp",
-        "libbase",
-        "libcutils",
-        "liblog",
-    ],
-    static_libs: [
-        "libavb",
-        "libfs_avb",
-        "libfstab",
-    ],
-    cflags: [
-        "-Wall",
-        "-Werror",
-        "-O3",
-    ],
-}
-
-cc_binary {
-    name: "httools_static",
-    device_supported: true,
+cc_binary_host {
+    name: "httools_host",
     static_executable: true,
     srcs: [
         "main.cpp",
     ],
     static_libs: [
-        "libcrypto_static",
-        "libfec",
+        "libcrypto",
         "libavb",
-        "libfs_avb",
-        "libfstab",
-        "libfs_mgr",
-        "libjsoncpp",
-        "libbase",
-        "libcutils",
-        "liblog",
     ],
     cflags: [
         "-Wall",

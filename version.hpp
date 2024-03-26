@@ -1,3 +1,3 @@
 #pragma once
 
-const char *version = "v3.2.0";
+const char *version = "v1.0.0";
